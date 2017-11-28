@@ -1,17 +1,17 @@
 #include <iostream>
 #include <cmath>
+#include <random>
 #include "WavFile.h"
 
 using namespace std;
 
 #define PI 3.14159265
 int main() {
-    cout << "Variable time delay with circular buffer" << endl;
-    int dtime = 50;                                // delay time is in ms
-    int var_dt = 8;                                // variable delay time in ms
+    cout << "Delay line with circular buffer" << endl;
+    int dtime = 500;                               // delay time is in ms
 
     // in file
-    string filename("files/Vox.wav");
+    string filename("files/cello.wav");
     WavInFile input(filename.c_str());
     int sr = input.getSampleRate();
     int bits = input.getNumBits();
@@ -19,59 +19,84 @@ int main() {
     int samples = input.getNumSamples();
 
     float dt = dtime*float(sr)/1000;            // delay in samples
-    float vdt = var_dt*float(sr)/1000;          // variable delay in samples
-
-    float gain = 0.0;                           // feedback gain
-    float wet = 0.4;                            // out balance
+    float gain = 0.3;                           // feedback gain
+    float wet = 0.7;                            // out balance
     float dry = 1 - wet;
 
     // out file
     WavOutFile out("files/out.wav", sr, bits, nchan);
 
     // memory allocation for input and output
-    auto *in_data = new float[samples+int(dt)];
-    auto *out_data = new float[samples+int(dt)];
-    cout << samples << ' ' << bits << ' ' << nchan << endl;
-    auto *del = new float[int(dt)];
+    auto *in_data = new double[samples+int(dt)];
+    auto *out_data = new double[samples+int(dt)];
+    auto *del = new double[int(dt)];
     std::fill(in_data, in_data+samples+int(dt), 0);
     std::fill(out_data, out_data+samples+int(dt), 0);
     std::fill(del, del+int(dt), 0);
 
-    float *rptr = del;                          // reading pointer
-    float *wptr = del;                          // writing pointer
-    float *mptr;                                // pointer for modulation
+    double *rptr, *wptr = del;
 
-    // modulation lookup table
-    auto *table = new float[sr];
-    for (int j = 0; j < sr; ++j){
-        table[j] = vdt/2 * (1 - (float) cos(2 * PI * j/(sr)));
+    // LFO wavetable: fill with hamming window
+    auto *lfo_window = new double[sr];
+    for (int j = 0; j < sr; ++j) {
+        lfo_window[j] = 0.5 * (1 - cos(2 * PI * j/(sr)));
     }
 
     // read input file
     input.read(in_data, samples);
-    float frac;                                 // fractional delay part
-    float interp_sample;
+
+    // initialise generator to sample for jittering part
+    default_random_engine generator;
+    normal_distribution<float> distribution(0, 1);
+    double sample, x_jit = 0;
+    double y_jit = 50;
+    double lfo_val, x_in;
 
     // delay section
     int j = 0;
     for (int i = 0; i < samples+int(dt); i++) {
+        // sample from normal distribution (100 Hz)
+        // todo: interpolation missing
+        if (i % (int)floor(sr/10) == 0) {
+            sample = distribution(generator);
+            if ((sample >= -1) && (sample <= 1)) {
+                // keep the value only
+                x_jit = sample;
+            }
+        }
+
+        // apply jittering to LFO wavetable
+        lfo_val = lfo_window[j] + x_jit;
+        lfo_val *= (y_jit * 0.1);
+        lfo_val += 1 - (y_jit*0.1);
+        lfo_val *= lfo_window[j];
+
+        // apply LFO to in source
+        x_in = in_data[i] * lfo_val;
+
         // read operations
-        frac = table[j] - floor(table[j]);
-        mptr = rptr - (int) table[j];
-        if (mptr < del) {mptr += (int) dt;}
-        if (mptr >= &del[(int)dt]) {mptr -= (int) dt;}
-        // variable time delay ----> y(n) = x(n) + ax(n - d(n))
-        interp_sample = (1-frac) * (*mptr) + frac * *(mptr-1 < del? mptr-1+(int) dt: mptr-1);
-        out_data[i] = wet * interp_sample + dry * in_data[i];
-        out_data[i] /= 2;
+        rptr = wptr - (int) dt;
+        if (rptr < del) {rptr += (int) dt;}
+        if (rptr >= &del[(int)dt]) {rptr -= (int) dt;}
+        out_data[i] = *rptr;
+
+        // sum original and fx
+        out_data[i] *= wet;
+        out_data[i] += dry * in_data[i];
+        // hard clipping
+        out_data[i] = out_data[i] < -1 ? -1 : out_data[i];
+        out_data[i] = out_data[i] > 1 ? 1 : out_data[i];
+
         // write
-        *wptr = in_data[i] + gain * out_data[i];
+        *wptr = x_in + gain * out_data[i];
+
         // update pointer
         ++rptr;
         ++ wptr;
+        ++j;
         if (wptr == &del[(int)dt]) {wptr = del;}
         if (rptr == &del[(int)dt]) {rptr = del;}
-        j = (j == (sr)? 0 : ++j);
+        if (j == sr-1) {j = 0;}
     }
 
     // write out file
@@ -80,6 +105,7 @@ int main() {
     delete[] in_data;
     delete[] out_data;
     delete[] del;
+    delete[] lfo_window;
 
     return 0;
 }
